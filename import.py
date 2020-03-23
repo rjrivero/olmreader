@@ -1,7 +1,9 @@
-from zipfile import ZipFile
+"""Import OLM file into a SQLite database"""
+
 import logging
-import sys
 import argparse
+from zipfile import ZipFile
+from typing import List
 from sqlalchemy import create_engine
 import sqlalchemy.orm as orm
 
@@ -17,7 +19,7 @@ class Batch:
     def __init__(self, batch_size, session, dry: bool = False):
         """Build a batch with the given size and action"""
         self._batch_size = batch_size
-        self._batch = list()
+        self._batch: List[Email] = list()
         self._session = session
         self._total = 0
         self._dry = dry
@@ -49,6 +51,7 @@ class Batch:
 
 @attr.s(auto_attribs=True)
 class Config:
+    """Configuration settings for import tool"""
     filename: str
     dbfile: str
     batch: int
@@ -85,6 +88,7 @@ class Config:
 
 
 def main():
+    """Main does the import from OLM into SQLite"""
     config = Config.load()
     engine = create_engine(f'sqlite:///{config.dbfile}', echo=False)
     Base.metadata.create_all(engine)

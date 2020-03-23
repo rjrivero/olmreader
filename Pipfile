@@ -8,8 +8,10 @@ yapf = "*"
 pylint = "*"
 mypy = "*"
 rope = "*"
+jupyter = "*"
 
 [packages]
 sqlalchemy = "*"
 xmltodict = "*"
 attrs = "*"
+python-dateutil = "*"

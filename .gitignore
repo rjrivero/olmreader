@@ -1,10 +1,15 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+output/
 *.py[cod]
 *$py.class
+settings.json
 
 # C extensions
 *.so
+*.pickle
+*.csv
+*.txt
 
 # Distribution / packaging
 .Python

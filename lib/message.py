@@ -2,13 +2,14 @@
 
 from typing import (Optional, Iterator, Sequence, Mapping, Any, Type, TypeVar)
 from html import unescape
-from datetime import datetime
-import pytz
-import itertools
-import email
 from email.message import EmailMessage
-from email.policy import Policy, SMTP
+from email.policy import SMTP
+from email.utils import formatdate
+import email
+import itertools
+import pytz
 from sqlalchemy.ext.declarative import declarative_base
+from dateutil.parser import isoparse
 
 import sqlalchemy as sa
 import sqlalchemy.orm as orm
@@ -34,7 +35,7 @@ _email_cc = many2many(Base, 'cc')
 _email_contact = many2many(Base, 'contact')
 
 
-def args(*args):
+def alchemy(*args):
     """Decorator to add arguments to Table model"""
     def decorate(cls):
         """Add __table_args__"""
@@ -56,8 +57,8 @@ def rel(table: str,
     return orm.relationship(table, **kw)
 
 
-@args(sa.UniqueConstraint('email', 'name', 'type'),
-      sa.Index('idx_name', 'name'))
+@alchemy(sa.UniqueConstraint('email', 'name', 'type'),
+         sa.Index('idx_name', 'name'))
 class Address(Base):
     """Represents an email address"""
     __tablename__ = "address"
@@ -150,8 +151,8 @@ class ParseError(Exception):
     xml: Optional[str]
 
 
-@args(sa.Index('idx_label', 'label'), sa.Index('idx_sentTime', 'sentTime'),
-      sa.Index('idx_receivedTime', 'receivedTime'))
+@alchemy(sa.Index('idx_label', 'label'), sa.Index('idx_sentTime', 'sentTime'),
+         sa.Index('idx_receivedTime', 'receivedTime'))
 class Email(Base):
     """Email database format"""
     __tablename__ = 'message'
@@ -173,7 +174,7 @@ class Email(Base):
     subject = sa.Column(sa.String(512), nullable=True)
     preview = sa.Column(sa.Text, nullable=True)
     body = sa.Column(sa.Text, nullable=True)
-    senderAddresses = rel('Address', secondary=_email_from)
+    fromAddresses = rel('Address', secondary=_email_from)
     toAddresses = rel('Address', secondary=_email_to)
     ccAddresses = rel('Address', secondary=_email_cc)
     contacts = rel('Address', 'messages', _email_contact)
@@ -197,34 +198,33 @@ class Email(Base):
             itertools.chain(*(item for item in lists if item is not None)))
 
     @staticmethod
-    def _text(email: D, attrib: str) -> Optional[str]:
+    def _text(msg: D, attrib: str) -> Optional[str]:
         """Retrieve text from email attibute"""
-        val = email.get(attrib, None)
+        val = msg.get(attrib, None)
         return None if val is None else val.get('#text', None)
 
     @staticmethod
-    def _html(email: D, attrib: str) -> Optional[str]:
+    def _html(msg: D, attrib: str) -> Optional[str]:
         """Get html text from an attibute"""
-        val = Email._text(email, attrib)
+        val = Email._text(msg, attrib)
         return None if val is None else unescape(val)
 
     @staticmethod
-    def _bool(email: D, attrib: str) -> Optional[bool]:
+    def _bool(msg: D, attrib: str) -> Optional[bool]:
         """Get boolean from attribute"""
-        val = Email._text(email, attrib)
+        val = Email._text(msg, attrib)
         return None if val is None else (float(val) > 0)
 
     @staticmethod
-    def _timestamp(email: D, attrib: str) -> Optional[int]:
+    def _timestamp(msg: D, attrib: str) -> Optional[int]:
         """Get boolean from attribute"""
-        val = Email._text(email, attrib)
+        val = Email._text(msg, attrib)
         if val is None:
             return None
         # SQLite does not have a native datetime format,
         # so we set a timestamp.
-        val = datetime.fromisoformat(val)
-        val = val.astimezone(pytz.utc)
-        return int(val.timestamp())
+        tstamp = isoparse(val).astimezone(pytz.utc)
+        return int(tstamp.timestamp())
 
     @staticmethod
     def _list(item: D, attribute, cls: Type[T]) -> Optional[Sequence[T]]:
@@ -243,28 +243,28 @@ class Email(Base):
             raise ParseError(key=err, attribute=item, email=None, xml=None)
 
     @staticmethod
-    def _addresses(email: D, attrib: str) -> Optional[Sequence[Address]]:
+    def _addresses(msg: D, attrib: str) -> Optional[Sequence[Address]]:
         """Get list of addresses from attribute"""
-        return Email._list(email.get(attrib, None), 'emailAddress', Address)
+        return Email._list(msg.get(attrib, None), 'emailAddress', Address)
 
     @staticmethod
-    def _attachments(email: D, attrib: str) -> Optional[Sequence[Attachment]]:
+    def _attachments(msg: D, attrib: str) -> Optional[Sequence[Attachment]]:
         """Get list of attachments from attribute"""
-        return Email._list(email.get(attrib, None), 'messageAttachment',
+        return Email._list(msg.get(attrib, None), 'messageAttachment',
                            Attachment)
 
     @staticmethod
-    def _address(email: D, attrib: str) -> Optional[Address]:
+    def _address(msg: D, attrib: str) -> Optional[Address]:
         """Get address from attribute"""
-        value = email.get(attrib, None)
+        value = msg.get(attrib, None)
         return None if value is None else Address.fromdict(
             value['emailAddress'])
 
-    def message(self, policy: Policy = SMTP) -> EmailMessage:
+    def message(self, policy=SMTP) -> EmailMessage:
         """Formats the current message as an EmailMessage"""
         msg = email.message.EmailMessage(policy)
         msg['Subject'] = self.subject or ""
-        for field, seq in (('From', self.senderAddresses),
+        for field, seq in (('From', self.fromAddresses),
                            ('To', self.toAddresses), ('CC', self.ccAddresses)):
             value = ""
             if seq is not None:
@@ -272,7 +272,7 @@ class Email(Base):
                                  if addr.email or addr.name)
             msg.add_header(field, value)
         if self.sentTime is not None:
-            msg.add_header('Date', email.utils.formatdate(self.sentTime))
+            msg.add_header('Date', formatdate(self.sentTime))
         if self.body is not None:
             if self.hasHTML:
                 msg.add_header('Content-Type', 'text/html')
@@ -286,49 +286,53 @@ class Email(Base):
         return msg
 
     @classmethod
-    def fromdict(cls, path, email):
+    def fromdict(cls, path, msg):
         """Build email message from dictionary"""
         parts = path.split('/')
         try:
-            senderAddress = Email._address(email,
-                                           'OPFMessageCopySenderAddress')
-            senderAddresses = list(
-                (senderAddress, )) if senderAddress is not None else list()
-            toAddresses = Email._addresses(email, 'OPFMessageCopyToAddresses')
-            ccAddresses = Email._addresses(email, 'OPFMessageCopyCCAddresses')
-            contacts = Email._contacts(senderAddresses, toAddresses,
-                                       ccAddresses)
+            # 'From' header comes as fromAddresses or
+            # senderAddress, some messages have fromAddresses
+            # and some don't.
+            fromAddresses = Email._addresses(msg,
+                                             'OPFMessageCopyFromAddresses')
+            senderAddress = Email._address(msg, 'OPFMessageCopySenderAddress')
+            if senderAddress is not None:
+                fromAddresses.append(senderAddress)
+                fromAddresses = Email.unique(fromAddresses)
+            toAddresses = Email._addresses(msg, 'OPFMessageCopyToAddresses')
+            ccAddresses = Email._addresses(msg, 'OPFMessageCopyCCAddresses')
+            contacts = Email._contacts(fromAddresses, toAddresses, ccAddresses)
             msg = cls(
                 path=path,
                 account=parts[1],
                 label='/'.join(parts[3:-1]),
                 isOutgoingMeetingResponse=Email._bool(
-                    email, 'OPFMessageIsOutgoingMeetingResponse'),
-                isOutgoing=Email._bool(email, 'OPFMessageIsOutgoing') or False,
+                    msg, 'OPFMessageIsOutgoingMeetingResponse'),
+                isOutgoing=Email._bool(msg, 'OPFMessageIsOutgoing') or False,
                 isCalendarMessage=Email._bool(
-                    email, 'OPFMessageIsCalendarMessage') or False,
-                hasHTML=Email._bool(email, 'OPFMessageGetHasHTML') or False,
-                hasRichText=Email._bool(email, 'OPFMessageGetHasRichText')
+                    msg, 'OPFMessageIsCalendarMessage') or False,
+                hasHTML=Email._bool(msg, 'OPFMessageGetHasHTML') or False,
+                hasRichText=Email._bool(msg, 'OPFMessageGetHasRichText')
                 or False,
                 toAddresses=toAddresses,
-                preview=Email._text(email, 'OPFMessageCopyPreview'),
-                receivedTime=Email._timestamp(email,
+                preview=Email._text(msg, 'OPFMessageCopyPreview'),
+                receivedTime=Email._timestamp(msg,
                                               'OPFMessageCopyReceivedTime'),
-                senderAddresses=senderAddresses,
-                sentTime=Email._timestamp(email, 'OPFMessageCopySentTime'),
-                subject=Email._text(email, 'OPFMessageCopySubject'),
+                fromAddresses=fromAddresses,
+                sentTime=Email._timestamp(msg, 'OPFMessageCopySentTime'),
+                subject=Email._text(msg, 'OPFMessageCopySubject'),
                 ccAddresses=ccAddresses,
                 contacts=contacts,
-                displayTo=Email._text(email, 'OPFMessageCopyDisplayTo'),
-                attachments=Email._attachments(email,
+                displayTo=Email._text(msg, 'OPFMessageCopyDisplayTo'),
+                attachments=Email._attachments(msg,
                                                'OPFMessageCopyAttachmentList'),
-                body=Email._html(email, 'OPFMessageCopyBody'))
+                body=Email._html(msg, 'OPFMessageCopyBody'))
             return msg
         except ParseError as err:
-            err.email = email
+            err.email = msg
             raise err
         except KeyError as err:
-            raise ParseError(key=err, email=email)
+            raise ParseError(key=err, email=msg)
 
     @classmethod
     def fromfile(cls, path: str, contents: str):
